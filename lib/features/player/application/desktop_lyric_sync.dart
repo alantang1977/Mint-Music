@@ -3,8 +3,11 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/l10n/l10n.dart';
 import '../../settings/application/settings_providers.dart';
 import '../domain/models/desktop_lyric_settings.dart';
+import '../domain/models/lyric_line.dart';
+import '../domain/models/song.dart';
 import '../platform/desktop_lyric_overlay.dart';
 import 'desktop_lyric_controller.dart';
 import 'lyric_controller.dart';
@@ -59,20 +62,27 @@ class DesktopLyricSyncController extends StateNotifier<DesktopLyricStatus>
   final Ref _ref;
   final DesktopLyricOverlay _overlay = DesktopLyricOverlay.instance;
 
-  String? _pushedSongId;
+  String? _lastLyricSignature;
   int _lastPushedIndex = -1;
 
   /// 用户点了开启但还没拿到悬浮窗权限:授权成功后自动开启。
   bool _pendingEnable = false;
 
-  /// 定期向原生侧下发进度锚点(校准漂移/处理跳转)。
-  Timer? _anchorTimer;
+  /// 周期同步定时器:进度锚点 + 歌词兜底下发。
+  Timer? _syncTimer;
 
   /// 上一次观测到的播放进度。
   ///
   /// 后台时 Dart 的进度回调可能被节流而停滞;此时若继续下发同一个进度,
   /// 会把原生侧正在自行推进的时钟反复拉回去,导致歌词卡住不更新。
   int _lastObservedPositionMs = -1;
+
+  /// 正在加载歌词的歌曲 id(用于检测卡死的加载)。
+  String? _lyricLoadingSongId;
+  DateTime? _lyricLoadingSince;
+
+  /// 单次同步是否正在进行,避免定时器回调重叠。
+  bool _syncing = false;
 
   Future<void> _bootstrap() async {
     _overlay.setPositionListener(_onPositionChanged);
@@ -85,7 +95,7 @@ class DesktopLyricSyncController extends StateNotifier<DesktopLyricStatus>
 
   @override
   void dispose() {
-    _stopAnchorTimer();
+    _stopSyncTimer();
     _overlay.setPositionListener(null);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
@@ -109,7 +119,7 @@ class DesktopLyricSyncController extends StateNotifier<DesktopLyricStatus>
     );
     if (!granted) {
       await _overlay.hide();
-      _stopAnchorTimer();
+      _stopSyncTimer();
       if (mounted) this.state = this.state.copyWith(overlayShowing: false);
       return;
     }
@@ -171,8 +181,11 @@ class DesktopLyricSyncController extends StateNotifier<DesktopLyricStatus>
   }
 
   /// 切歌:重置已下发的歌词,并为新歌主动拉取歌词。
+  ///
+  /// [syncVisibility] 里的 [pushLyric] 会先把悬浮窗清空,新歌词加载完成后
+  /// 再由 [onLyricChanged] 下发,因此不会残留上一首的歌词。
   void onSongChanged() {
-    _pushedSongId = null;
+    _lastLyricSignature = null;
     _lastPushedIndex = -1;
     _lastObservedPositionMs = -1;
     ensureLyricsLoaded();
@@ -185,26 +198,48 @@ class DesktopLyricSyncController extends StateNotifier<DesktopLyricStatus>
     unawaited(pushLyric(force: true));
   }
 
-  Future<void> pushActiveIndex(int index) async {
-    if (!state.usingNativeOverlay) return;
-    if (index == _lastPushedIndex) return;
-    _lastPushedIndex = index;
-    await _overlay.updateActiveIndex(index);
-  }
-
   /// 桌面歌词开启时,即使歌词页没打开也要为当前歌曲拉取歌词。
   ///
   /// [lyricControllerProvider] 内部已经监听切歌,但它只在被监听时才存在;
   /// 这里保证「开启桌面歌词」这一路径一定会触发一次加载。
+  ///
+  /// 另外做了两件后台场景下必需的兜底:
+  /// 1. 以「加载是否已结束」而不是「lines 是否非空」判定完成,否则无歌词的
+  ///    歌曲会被每秒重复请求;
+  /// 2. 同一首歌卡在 `isLoading` 超过 [_lyricStuckTimeout] 就强制重跑一次
+  ///    —— 退到后台后网络/DB 请求可能长时间不返回,导致歌词一直空白。
   void ensureLyricsLoaded() {
     if (!_ref.read(desktopLyricSettingsProvider).enable) return;
     final song = _ref.read(playbackControllerProvider).currentSong;
     if (song == null) return;
     final lyric = _ref.read(lyricControllerProvider);
-    final loaded = lyric.currentSongId == song.id && lyric.lines.isNotEmpty;
-    if (loaded || lyric.isLoading) return;
+
+    if (lyric.isLoading) {
+      if (_lyricLoadingSongId != song.id) {
+        _lyricLoadingSongId = song.id;
+        _lyricLoadingSince = DateTime.now();
+        return;
+      }
+      final since = _lyricLoadingSince;
+      if (since == null ||
+          DateTime.now().difference(since) < _lyricStuckTimeout) {
+        return;
+      }
+      // 卡住了:强制重跑一次。
+    } else if (lyric.currentSongId == song.id) {
+      // 这首歌已经加载过(有歌词 / 无歌词 / 解析失败都算完成)。
+      _lyricLoadingSongId = null;
+      _lyricLoadingSince = null;
+      return;
+    }
+
+    _lyricLoadingSongId = song.id;
+    _lyricLoadingSince = DateTime.now();
     unawaited(_ref.read(lyricControllerProvider.notifier).loadLyrics(song));
   }
+
+  /// 歌词加载的卡死阈值。
+  static const Duration _lyricStuckTimeout = Duration(seconds: 20);
 
   Future<void> syncVisibility() async {
     final settings = _ref.read(desktopLyricSettingsProvider);
@@ -213,14 +248,14 @@ class DesktopLyricSyncController extends StateNotifier<DesktopLyricStatus>
     if (!settings.enable || song == null) {
       await _overlay.hide();
       if (mounted) state = state.copyWith(overlayShowing: false);
-      _pushedSongId = null;
+      _lastLyricSignature = null;
       return;
     }
 
     ensureLyricsLoaded();
 
     if (!_overlay.supported || !state.permissionGranted) {
-      _stopAnchorTimer();
+      _stopSyncTimer();
       if (mounted) state = state.copyWith(overlayShowing: false);
       return;
     }
@@ -229,7 +264,7 @@ class DesktopLyricSyncController extends StateNotifier<DesktopLyricStatus>
     if (!mounted) return;
     state = state.copyWith(overlayShowing: shown);
     if (!shown) {
-      _stopAnchorTimer();
+      _stopSyncTimer();
       return;
     }
 
@@ -237,7 +272,7 @@ class DesktopLyricSyncController extends StateNotifier<DesktopLyricStatus>
     await pushLyric(force: true);
     // 交给原生侧自行推进,并定期校准。
     await pushPlayState(force: true);
-    _startAnchorTimer();
+    _startSyncTimer();
   }
 
   /// 下发一次进度锚点。
@@ -256,32 +291,71 @@ class DesktopLyricSyncController extends StateNotifier<DesktopLyricStatus>
     );
   }
 
-  void _startAnchorTimer() {
-    _anchorTimer?.cancel();
-    _anchorTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-      unawaited(pushPlayState());
+  void _startSyncTimer() {
+    _syncTimer?.cancel();
+    _syncTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      unawaited(_periodicSync());
     });
   }
 
-  void _stopAnchorTimer() {
-    _anchorTimer?.cancel();
-    _anchorTimer = null;
+  void _stopSyncTimer() {
+    _syncTimer?.cancel();
+    _syncTimer = null;
   }
 
+  /// 周期同步:确保「歌词已加载 + 已下发 + 进度已锚定」。
+  ///
+  /// 退到后台后,Riverpod 的监听回调、网络请求都可能延迟甚至丢失。只靠事件
+  /// 驱动会出现「切歌后悬浮窗一直空白,回到应用才补上」。这里做一次兜底轮询:
+  /// 每秒检查一次,内容有变化才真正下发([pushLyric] 内部按签名去重)。
+  Future<void> _periodicSync() async {
+    if (!mounted || !state.usingNativeOverlay) return;
+    if (_syncing) return;
+    _syncing = true;
+    try {
+      ensureLyricsLoaded();
+      await pushLyric();
+      await pushPlayState();
+    } finally {
+      _syncing = false;
+    }
+  }
+
+  /// 把当前歌词整批下发给原生悬浮窗。
+  ///
+  /// 两个必须处理的点:
+  /// 1. 切歌后新歌词还没加载出来时,**必须先下发空歌词把悬浮窗清空**,
+  ///    否则会残留上一首的歌词(加载最长 10 秒,期间一直显示错的歌词)。
+  /// 2. 新歌没有歌词 / 加载失败时,lines 为空,同样要下发(用占位行)而不是
+  ///    直接 return —— 之前 `if (lines.isEmpty) return;` 会让上一首的歌词
+  ///    永久残留在悬浮窗上。
   Future<void> pushLyric({bool force = false}) async {
     if (!state.usingNativeOverlay) return;
     final song = _ref.read(playbackControllerProvider).currentSong;
     if (song == null) return;
-    if (!force && _pushedSongId == song.id) return;
 
-    final lyric = _ref.read(lyricControllerProvider);
-    if (lyric.lines.isEmpty) return;
+    final lines = _ref.read(desktopLyricLinesProvider);
+    final ready = areLyricsReadyForSong(song, _ref.read(lyricControllerProvider));
 
-    _pushedSongId = song.id;
+    // 只有内容真的变了才下发（含"是否就绪"这一维度）。
+    final signature = '${song.id}#${ready ? 1 : 0}#${lines.length}#'
+        '${identityHashCode(lines)}';
+    if (!force && signature == _lastLyricSignature) return;
+    _lastLyricSignature = signature;
+
+    final payload = switch ((ready, lines.isEmpty)) {
+      // 加载中 / 歌词不属于当前歌：显示歌名占位，既不残留上一首的歌词，
+      // 也不会让悬浮窗整块空白（退到后台加载较慢时尤其明显）。
+      (false, _) => <LyricLine>[_placeholderLine(_loadingText(song))],
+      // 已就绪但这首歌没有歌词
+      (true, true) => <LyricLine>[_placeholderLine(tr('暂无歌词'))],
+      (true, false) => lines,
+    };
+
     _lastPushedIndex = _ref.read(desktopLyricActiveIndexProvider);
     await _overlay.updateLyric(
-      lines: lyric.lines,
-      activeIndex: _lastPushedIndex,
+      lines: payload,
+      activeIndex: _lastPushedIndex < 0 ? 0 : _lastPushedIndex,
       showTranslation: _ref.read(lyricShowTranslationProvider),
       showRoman: _ref.read(lyricShowRomanProvider),
     );
@@ -289,6 +363,18 @@ class DesktopLyricSyncController extends StateNotifier<DesktopLyricStatus>
     _lastObservedPositionMs = -1;
     await pushPlayState(force: true);
   }
+
+  /// 加载中显示的占位文本：优先歌名，让悬浮窗立刻有内容而不是空白。
+  String _loadingText(Song song) {
+    final title = song.title.trim();
+    return title.isEmpty ? tr('歌词加载中') : title;
+  }
+
+  static LyricLine _placeholderLine(String text) => LyricLine(
+    startTimeMs: 0,
+    endTimeMs: 0,
+    words: [LyricWord(word: text, startTimeMs: 0, endTimeMs: 0)],
+  );
 
   void _onPositionChanged(double x, double y) {
     updateDesktopLyricSettings(
@@ -314,9 +400,10 @@ final desktopLyricSyncProvider =
       ref.listen(desktopLyricLinesProvider, (_, __) {
         controller.onLyricChanged();
       });
-      ref.listen(desktopLyricActiveIndexProvider, (_, next) {
-        controller.pushActiveIndex(next);
-      });
+      // 这里**不再**周期性把行号推给原生:原生侧有自己的时钟并按“到下一行的
+      // 精确剩余时间”调度。Dart 侧的 position 天生滞后(200ms 粒度 + 通道延迟),
+      // 与原生时钟同时驱动会互相打架:滞后的行号把原生往回拽,表现为歌词
+      // 慢半拍 + 往回跳一下的闪动。行号只在 updateLyric 时作为初值下发。
       // 播放/暂停切换时立刻刷新锚点,暂停后原生侧停止推进。
       ref.listen(playbackControllerProvider.select((s) => s.isPlaying), (_, __) {
         unawaited(controller.pushPlayState(force: true));

@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../settings/application/settings_providers.dart';
 import '../domain/models/desktop_lyric_settings.dart';
 import '../domain/models/lyric_line.dart';
+import '../domain/models/song.dart';
 import 'lyric_controller.dart';
 import 'playback_controller.dart';
 
@@ -18,7 +19,7 @@ final desktopLyricActiveIndexProvider = Provider<int>((ref) {
     desktopLyricSettingsProvider.select((s) => s.enable),
   );
   if (!enabled) return -1;
-  final lines = ref.watch(lyricControllerProvider.select((s) => s.lines));
+  final lines = ref.watch(desktopLyricLinesProvider);
   if (lines.isEmpty) return -1;
   final positionMs = ref.watch(
     playbackControllerProvider.select((s) => s.position.inMilliseconds),
@@ -30,15 +31,42 @@ final desktopLyricActiveIndexProvider = Provider<int>((ref) {
 
 /// 桌面歌词使用的歌词行。
 ///
-/// 同样只在开启时才订阅 [lyricControllerProvider]:歌词控制器一旦被监听
+/// 关键：**不能直接透传 `LyricController.state.lines`**。切歌时
+/// [LyricController] 会刻意保留上一首的歌词行（避免 AMLL 视图卸载导致整屏
+/// 闪烁），所以"lines 非空"并不代表这些歌词属于当前播放的歌曲。这里按
+/// 「已加载完成 + 属于当前歌曲」过滤，未就绪时返回空，由调用方先清空悬浮窗。
+///
+/// 同时只在开启时才订阅 [lyricControllerProvider]:歌词控制器一旦被监听
 /// 就会在切歌时主动拉取歌词,未开启桌面歌词时不应产生这些请求。
 final desktopLyricLinesProvider = Provider<List<LyricLine>>((ref) {
   final enabled = ref.watch(
     desktopLyricSettingsProvider.select((s) => s.enable),
   );
   if (!enabled) return const [];
-  return ref.watch(lyricControllerProvider.select((s) => s.lines));
+  final song = ref.watch(
+    playbackControllerProvider.select((s) => s.currentSong),
+  );
+  // 监听整个 state 而不是只 select(lines)：加载开始/结束都要触发重算。
+  final lyric = ref.watch(lyricControllerProvider);
+  if (!areLyricsReadyForSong(song, lyric)) return const [];
+  return lyric.lines;
 });
+
+/// 判断歌词状态是否可以展示给桌面歌词（纯函数，便于测试）。
+bool areLyricsReadyForSong(Song? song, LyricState lyric) {
+  if (song == null) return false;
+  // 加载中：lines 仍是上一首的旧歌词
+  if (lyric.isLoading) return false;
+  // 歌词不属于当前播放的歌曲
+  if (lyric.currentSongId != song.id) return false;
+  // 来源不一致（例如本地 vs 在线）时同样不可用；任一侧为空则不比较
+  if (lyric.currentSongSource != null &&
+      song.source != null &&
+      lyric.currentSongSource != song.source) {
+    return false;
+  }
+  return true;
+}
 
 /// 读取 provider 的函数类型。
 ///

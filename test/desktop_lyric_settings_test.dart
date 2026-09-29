@@ -10,7 +10,7 @@ void main() {
       expect(s.isSingleLine, false);
       expect(s.showToggleAnima, true);
       expect(s.widthPercent, 100);
-      expect(s.maxLineNum, 5);
+      expect(s.maxLineNum, 1);
       expect(s.playedColor, 0xFF07C556);
       expect(s.unplayColor, 0xFFFFFFFF);
     });

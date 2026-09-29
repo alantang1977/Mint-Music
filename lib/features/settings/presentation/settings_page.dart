@@ -515,6 +515,20 @@ Color _parseHexColor(String hex) {
   }
 }
 
+/// 主题模式对应的显示名（选择主题弹窗的选项文案）。
+String _themeModeLabel(ThemeMode mode) => switch (mode) {
+  ThemeMode.dark => '深色主题',
+  ThemeMode.system => '跟随系统',
+  ThemeMode.light => '浅色主题',
+};
+
+/// 选择主题弹窗的选项文案对应的主题模式。
+ThemeMode _themeModeFromLabel(String label) => switch (label) {
+  '深色主题' => ThemeMode.dark,
+  '跟随系统' => ThemeMode.system,
+  _ => ThemeMode.light,
+};
+
 /// 歌词语言模式值(follow / zh-CN / zh-TW)对应的显示名。
 String _lyricLocaleModeLabel(String mode) {
   switch (mode) {
@@ -551,7 +565,12 @@ class _AppearanceContent extends ConsumerWidget {
     ThemeColors colors,
   ) {
     final themeMode = ref.watch(themeModeProvider);
-    final themeName = themeMode == ThemeMode.light ? '浅色主题' : '深色主题';
+    final platformBrightness = ref.watch(platformBrightnessProvider);
+    final themeName = _themeModeLabel(themeMode);
+    // 跟随系统时把实际生效的亮/暗显示出来（CeruMusic 里只通过开关状态间接体现）
+    final themeSubtitle = themeMode == ThemeMode.system
+        ? '跟随系统，当前为${isThemeModeLight(themeMode, platformBrightness) ? '浅色' : '深色'}'
+        : '选择应用的主题颜色';
     final appLocale = ref.watch(appLocaleProvider);
     final lyricLocaleMode = ref.watch(lyricLocaleModeProvider);
     final primaryHex = ref.watch(themePrimaryColorProvider);
@@ -575,7 +594,7 @@ class _AppearanceContent extends ConsumerWidget {
         _SettingRow(
           icon: Icons.palette,
           title: '应用主题',
-          subtitle: '选择应用的主题颜色',
+          subtitle: themeSubtitle,
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -592,18 +611,16 @@ class _AppearanceContent extends ConsumerWidget {
             context,
             colors,
             '选择主题',
-            ['浅色主题', '深色主题'],
+            const ['浅色主题', '深色主题', '跟随系统'],
             themeName,
             (v) {
               final container = ProviderScope.containerOf(context);
-              final mode = v == '浅色主题' ? ThemeMode.light : ThemeMode.dark;
+              final mode = _themeModeFromLabel(v);
               container.read(themeModeProvider.notifier).state = mode;
               unawaited(
                 _doPersist(
                   container,
-                  (s) => s.setThemeMode(
-                    mode == ThemeMode.light ? 'light' : 'dark',
-                  ),
+                  (s) => s.setThemeMode(themeModeToPref(mode)),
                 ),
               );
             },

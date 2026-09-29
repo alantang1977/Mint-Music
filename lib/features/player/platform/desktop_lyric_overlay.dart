@@ -101,6 +101,7 @@ class DesktopLyricOverlay {
       await _channel.invokeMethod<void>('updateConfig', {
         'isLock': settings.isLock,
         'isSingleLine': settings.isSingleLine,
+        'showToggleAnima': settings.showToggleAnima,
         'maxLineNum': settings.maxLineNum,
         'fontSize': settings.fontSize,
         'opacityPercent': settings.opacityPercent,
@@ -152,18 +153,10 @@ class DesktopLyricOverlay {
     }
   }
 
-  Future<void> updateActiveIndex(int index) async {
-    if (!supported) return;
-    try {
-      await _channel.invokeMethod<void>('updateActiveIndex', index);
-    } on PlatformException {
-      // 忽略
-    } on MissingPluginException {
-      // 忽略
-    }
-  }
-
   /// 下发进度锚点:原生侧据此用单调时钟自行推进歌词行。
+  ///
+  /// 行号由原生侧自行计算并按到下一行的精确剩余时间调度,Dart 侧不再推送
+  /// 行号(见 [desktopLyricSyncProvider] 里的说明)。
   Future<void> setPlayState({
     required int positionMs,
     required bool isPlaying,

@@ -59,7 +59,8 @@ class _DesktopLyricWindowState extends ConsumerState<DesktopLyricWindow> {
   @override
   Widget build(BuildContext context) {
     final settings = ref.watch(desktopLyricSettingsProvider);
-    final lines = ref.watch(lyricControllerProvider.select((s) => s.lines));
+    // 用过滤后的歌词行：切歌加载期间不会显示上一首的歌词
+    final lines = ref.watch(desktopLyricLinesProvider);
     final songId = ref.watch(
       lyricControllerProvider.select((s) => s.currentSongId),
     );

@@ -229,7 +229,7 @@ final fullScreenBackgroundModeProvider =
 
 // -- app version (loaded once) --
 final appVersionProvider = FutureProvider<String>((ref) async {
-  return '1.0.8';
+  return '1.0.9';
 });
 
 class EqPreset {
@@ -273,14 +273,10 @@ final settingsInitProvider = FutureProvider<void>((ref) async {
   // 加载歌词语言模式
   ref.read(lyricLocaleModeProvider.notifier).state = svc.getLyricLocaleMode();
 
-  final themeStr = svc.getThemeMode();
-  if (themeStr == 'light') {
-    ref.read(themeModeProvider.notifier).state = ThemeMode.light;
-  } else if (themeStr == 'dark') {
-    ref.read(themeModeProvider.notifier).state = ThemeMode.dark;
-  } else {
-    ref.read(themeModeProvider.notifier).state = ThemeMode.light;
-  }
+  // 'light' / 'dark' / 'system'，未知值回落为浅色
+  ref.read(themeModeProvider.notifier).state = themeModeFromPref(
+    svc.getThemeMode(),
+  );
   ref.read(themePrimaryColorProvider.notifier).state = svc
       .getThemePrimaryColor();
 

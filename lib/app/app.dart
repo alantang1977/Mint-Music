@@ -6,6 +6,7 @@ import '../core/l10n/l10n.dart';
 import '../core/theme/app_theme.dart';
 import '../core/theme/theme_provider.dart';
 import '../core/router/app_router.dart';
+import '../core/theme/system_brightness_sync.dart';
 import '../core/utils/responsive_layout.dart';
 import '../features/player/presentation/desktop_lyric_window.dart';
 import '../features/plugin/application/plugin_providers.dart';
@@ -49,15 +50,17 @@ class _AppState extends ConsumerState<App> {
       });
     }
 
-    return L10n(
-      locale: appLocale,
-      child: MaterialApp.router(
-        title: tr('薄荷音乐'),
-        debugShowCheckedModeBanner: false,
-        theme: AppTheme.light,
-        darkTheme: AppTheme.dark,
-        themeMode: themeMode,
-        routerConfig: appRouter,
+    // 系统亮/暗变化同步进 provider，「跟随系统」主题才能实时跟随
+    return SystemBrightnessSync(
+      child: L10n(
+        locale: appLocale,
+        child: MaterialApp.router(
+          title: tr('薄荷音乐'),
+          debugShowCheckedModeBanner: false,
+          theme: AppTheme.light,
+          darkTheme: AppTheme.dark,
+          themeMode: themeMode,
+          routerConfig: appRouter,
         builder: (context, child) {
           final deviceType = ResponsiveLayout.getDeviceType(context);
           final layoutMode = ResponsiveLayout.getLayoutMode(context);
@@ -84,6 +87,7 @@ class _AppState extends ConsumerState<App> {
             ],
           );
         },
+        ),
       ),
     );
   }

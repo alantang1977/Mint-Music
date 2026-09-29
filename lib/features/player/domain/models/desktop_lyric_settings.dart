@@ -49,7 +49,8 @@ class DesktopLyricSettings {
     isSingleLine: false,
     showToggleAnima: true,
     widthPercent: 100,
-    maxLineNum: 5,
+    // 默认只显示当前行（与 lx-music 的默认 5 行不同，这里按产品需求取 1 行）
+    maxLineNum: 1,
     fontSize: 18,
     opacityPercent: 100,
     textAlignX: DesktopLyricTextAlignX.left,
